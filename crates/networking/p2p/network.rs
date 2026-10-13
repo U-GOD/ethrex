@@ -119,8 +119,18 @@ pub enum NetworkError {
     DiscoveryError(#[from] DiscoveryServerError),
     #[error("Failed to start Tx Broadcaster: {0}")]
     TxBroadcasterError(#[from] TxBroadcasterError),
-    #[error("Failed to bind UDP socket: {0}")]
-    UdpSocketError(std::io::Error),
+    #[error("Failed to bind UDP socket at {addr}: {source}")]
+    UdpSocketError {
+        addr: SocketAddr,
+        #[source]
+        source: io::Error,
+    },
+    #[error("Failed to bind TCP socket at {addr}: {source}")]
+    TcpSocketError {
+        addr: SocketAddr,
+        #[source]
+        source: io::Error,
+    },
     #[error("Failed to build the local node record: {0}")]
     LocalNodeRecordError(#[from] NodeError),
 }
@@ -157,11 +167,21 @@ pub async fn start_network(
     config: DiscoveryConfig,
     shared_local_node: SharedLocalNode,
 ) -> Result<(), NetworkError> {
-    let udp_socket = Arc::new(
-        UdpSocket::bind(context.network_config.bind_udp_addr())
-            .await
-            .map_err(NetworkError::UdpSocketError)?,
-    );
+    let udp_addr = context.network_config.bind_udp_addr();
+    let udp_socket = Arc::new(UdpSocket::bind(udp_addr).await.map_err(|source| {
+        NetworkError::UdpSocketError {
+            addr: udp_addr,
+            source,
+        }
+    })?);
+
+    // Bind the RLPx listener here rather than inside the spawned task, so a port that is
+    // already in use aborts startup instead of leaving the node running without inbound peers.
+    let tcp_addr = context.network_config.bind_tcp_addr();
+    let tcp_listener = listener(tcp_addr).map_err(|source| NetworkError::TcpSocketError {
+        addr: tcp_addr,
+        source,
+    })?;
 
     let (local_node_record, initial_fork_id) = build_local_node_record(&context).await?;
 
@@ -188,21 +208,16 @@ pub async fn start_network(
         error!("Failed to start discovery server: {e}");
     })?;
 
-    context.tracker.spawn(serve_p2p_requests(context.clone()));
+    context
+        .tracker
+        .spawn(serve_p2p_requests(context.clone(), tcp_listener));
 
     Ok(())
 }
 
-pub(crate) async fn serve_p2p_requests(context: P2PContext) {
+pub(crate) async fn serve_p2p_requests(context: P2PContext, listener: TcpListener) {
     let tcp_addr = context.network_config.bind_tcp_addr();
     let external_tcp_addr = context.local_node.tcp_addr();
-    let listener = match listener(tcp_addr) {
-        Ok(result) => result,
-        Err(e) => {
-            error!("Error opening tcp socket at {tcp_addr}: {e}. Stopping p2p server");
-            return;
-        }
-    };
     loop {
         let (stream, peer_addr) = match listener.accept().await {
             Ok(result) => result,

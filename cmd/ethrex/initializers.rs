@@ -460,7 +460,7 @@ pub async fn init_network(
     blockchain: Arc<Blockchain>,
     context: P2PContext,
     shared_local_node: SharedLocalNode,
-) {
+) -> eyre::Result<()> {
     #[cfg(not(feature = "l2"))]
     if opts.dev {
         error!("Binary wasn't built with The feature flag `dev` enabled.");
@@ -477,14 +477,13 @@ pub async fn init_network(
         nat_extip_set: opts.nat_extip.is_some(),
     };
 
-    ethrex_p2p::start_network(context, bootnodes, discovery_config, shared_local_node)
-        .await
-        .expect("Network starts");
+    ethrex_p2p::start_network(context, bootnodes, discovery_config, shared_local_node).await?;
 
     tracker.spawn(ethrex_p2p::periodically_show_peer_stats(
         blockchain,
         peer_handler.peer_table,
     ));
+    Ok(())
 }
 
 #[cfg(feature = "dev")]
@@ -1006,7 +1005,7 @@ pub async fn init_l1(
             p2p_context,
             shared_local_node.clone(),
         )
-        .await;
+        .await?;
     } else {
         info!("P2P is disabled");
     }
